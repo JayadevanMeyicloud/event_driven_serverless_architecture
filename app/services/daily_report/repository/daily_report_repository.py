@@ -4,129 +4,95 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# Fetch all unique uploaders who uploaded files today.
-def get_today_uploaders():
-
-    connection = get_connection()
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT DISTINCT
-                    uploader_name,
-                    uploader_email
-                FROM file_metadata
-                WHERE uploaded_at >= CURRENT_DATE
-                  AND uploaded_at < CURRENT_DATE + INTERVAL '1 day'
-                ORDER BY uploader_name;
-                """
-            )
-
-            rows = cursor.fetchall()
-
-            uploaders = [
-                {"uploader_name": row[0], "uploader_email": row[1]} for row in rows
-            ]
-
-            logger.info(f"Found {len(uploaders)} uploader(s).")
-
-            return uploaders
-
-    except Exception:
-        logger.exception("Failed to fetch today's uploaders.")
-        raise
-
-    finally:
-        connection.close()
-
-
-# Fetch all files uploaded today by a specific uploader.
-def get_user_upload_summary(uploader_email):
+def get_daily_report(
+    uploader_email=None,
+    page=1,
+    limit=100,
+):
 
     connection = get_connection()
 
     try:
         with connection.cursor() as cursor:
+            # Call Stored Procedure
             cursor.execute(
                 """
-                SELECT
-                    COUNT(*) AS total_files,
-                    COALESCE(SUM(file_size), 0) AS total_storage,
-
-                    COUNT(*) FILTER
-                    (
-                        WHERE upload_status = 'SUCCESS'
-                    ) AS success_count,
-
-                    COUNT(*) FILTER
-                    (
-                        WHERE upload_status = 'FAILED'
-                    ) AS failed_count
-
-                FROM file_metadata
-                WHERE uploader_email = %s
-                  AND uploaded_at >= CURRENT_DATE
-                  AND uploaded_at < CURRENT_DATE + INTERVAL '1 day';
+                CALL get_daily_report(
+                    %s,
+                    %s,
+                    %s,
+                    'uploaders',
+                    'summary',
+                    'filetypes'
+                );
                 """,
-                (uploader_email,),
+                (uploader_email, page, limit),
             )
 
-            row = cursor.fetchone()
+            # fetch uploaders if uploader_email is None
+            if uploader_email is None:
+                cursor.execute("FETCH ALL FROM uploaders;")
 
-            summary = {
-                "total_files": row[0],
-                "total_storage": row[1],
-                "success_count": row[2],
-                "failed_count": row[3],
-            }
+                rows = cursor.fetchall()
 
-            logger.info(f"Summary generated for {uploader_email}")
+                uploaders = [
+                    {
+                        "uploader_name": row[0],
+                        "uploader_email": row[1],
+                    }
+                    for row in rows
+                ]
 
-            return summary
+                connection.commit()
+
+                logger.info(f"Fetched {len(uploaders)} uploader(s).")
+
+                return uploaders
+
+            # fetch summary and file type statistics if uploader_email is provided
+            else:
+                # Fetch Summary
+                cursor.execute("FETCH ALL FROM summary;")
+
+                row = cursor.fetchone()
+
+                summary = {
+                    "total_files": row[0],
+                    "total_storage": row[1],
+                    "success_count": row[2],
+                    "failed_count": row[3],
+                }
+
+                # Fetch File Type Summary
+                cursor.execute("FETCH ALL FROM filetypes;")
+
+                rows = cursor.fetchall()
+
+                file_types = [
+                    {
+                        "file_type": row[0],
+                        "count": row[1],
+                    }
+                    for row in rows
+                ]
+
+                connection.commit()
+
+                logger.info(f"Fetched report for {uploader_email}")
+
+                return {
+                    "summary": summary,
+                    "file_types": file_types,
+                }
 
     except Exception:
-        logger.exception("Failed to fetch upload summary.")
+        connection.rollback()
+
+        logger.exception("Failed to fetch daily report.")
+
         raise
 
     finally:
         connection.close()
 
 
-# Fetch file type statistics.
-def get_file_type_summary(uploader_email):
-
-    connection = get_connection()
-
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    file_type,
-                    COUNT(*) AS total_files
-
-                FROM file_metadata
-                WHERE uploader_email = %s
-                  AND uploaded_at >= CURRENT_DATE
-                  AND uploaded_at < CURRENT_DATE + INTERVAL '1 day'
-
-                GROUP BY file_type
-                ORDER BY total_files DESC;
-                """,
-                (uploader_email,),
-            )
-
-            rows = cursor.fetchall()
-
-            file_types = [{"file_type": row[0], "count": row[1]} for row in rows]
-
-            logger.info(f"Found {len(file_types)} file type(s) for {uploader_email}")
-
-            return file_types
-
-    except Exception:
-        logger.exception("Failed to fetch file type summary.")
-        raise
-
-    finally:
-        connection.close()
